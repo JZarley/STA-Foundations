@@ -22,6 +22,8 @@ module mac_pipe1_tb;
     logic out_ready;
     logic [Y_WIDTH-1:0] y;
 
+    logic random_phase_done;
+
     //------------------------------------------------------------
     // DUT
     //------------------------------------------------------------
@@ -126,6 +128,44 @@ module mac_pipe1_tb;
     end
 
     //------------------------------------------------------------
+    // Stall-stability monitor
+    //------------------------------------------------------------
+
+    logic stalled_last_cycle;
+    logic [Y_WIDTH-1:0] stalled_y;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            stalled_last_cycle <= 1'b0;
+            stalled_y          <= '0;
+        end else begin
+
+            // If the output was stalled and remains stalled,
+            // the transaction must still be present and unchanged.
+            if (stalled_last_cycle && !out_ready) begin
+                assert (out_valid)
+                    else $fatal(
+                        1,
+                        "out_valid deasserted while output remained stalled"
+                    );
+
+                assert (y === stalled_y)
+                    else $fatal(
+                        1,
+                        "Output payload changed while stalled"
+                    );
+            end
+
+            if (out_valid && !out_ready) begin
+                stalled_last_cycle <= 1'b1;
+                stalled_y          <= y;
+            end else begin
+                stalled_last_cycle <= 1'b0;
+            end
+        end
+    end
+
+    //------------------------------------------------------------
     // Helper task
     //------------------------------------------------------------
 
@@ -159,18 +199,24 @@ module mac_pipe1_tb;
     endtask
 
     //------------------------------------------------------------
-    // Test sequence
+    // Waveform
     //------------------------------------------------------------
+
     initial begin
-        $dumpfile("waveform.vcd");
+        $dumpfile("results/waveform.vcd");
         $dumpvars(1, mac_pipe1_tb);
     end
+
+    //------------------------------------------------------------
+    // Test sequence
+    //------------------------------------------------------------
+
     initial begin
 
-        reset     = 1'b1;
-
-        in_valid  = 1'b0;
-        out_ready = 1'b1;
+        reset             = 1'b1;
+        in_valid          = 1'b0;
+        out_ready         = 1'b1;
+        random_phase_done = 1'b0;
 
         a = '0;
         b = '0;
@@ -187,6 +233,14 @@ module mac_pipe1_tb;
         @(negedge clk);
         reset = 1'b0;
 
+        @(posedge clk);
+
+        assert (!out_valid)
+            else $fatal(1, "out_valid asserted after reset");
+
+        assert (in_ready)
+            else $fatal(1, "DUT not ready after reset");
+
         //--------------------------------------------------------
         // Test 1: Basic arithmetic
         //--------------------------------------------------------
@@ -198,9 +252,6 @@ module mac_pipe1_tb;
             8'd5,
             17'd10
         );
-
-        // Expected:
-        // (2*3) + (4*5) + 10 = 36
 
         //--------------------------------------------------------
         // Test 2: Back-to-back transactions
@@ -216,7 +267,6 @@ module mac_pipe1_tb;
         in_valid = 1'b1;
 
         @(posedge clk);
-
         @(negedge clk);
 
         a = 8'd10;
@@ -226,7 +276,6 @@ module mac_pipe1_tb;
         e = 17'd20;
 
         @(posedge clk);
-
         @(negedge clk);
 
         a = 8'd12;
@@ -236,8 +285,8 @@ module mac_pipe1_tb;
         e = 17'd7;
 
         @(posedge clk);
-
         @(negedge clk);
+
         in_valid = 1'b0;
 
         //--------------------------------------------------------
@@ -267,47 +316,154 @@ module mac_pipe1_tb;
         );
 
         //--------------------------------------------------------
-        // Test 5: Consumer stall
+        // Test 5: Consumer stall and backpressure
         //--------------------------------------------------------
 
-        send_transaction(
-            8'd20,
-            8'd4,
-            8'd3,
-            8'd7,
-            17'd9
-        );
-
-        send_transaction(
-            8'd8,
-            8'd8,
-            8'd9,
-            8'd9,
-            17'd1
-        );
-
-        // Stall downstream long enough for pressure to propagate.
         @(negedge clk);
         out_ready = 1'b0;
 
-        repeat (5) @(posedge clk);
+        fork
+
+            // Keep presenting traffic. This process will naturally
+            // block once backpressure reaches the input.
+            begin : stalled_producer
+                for (int i = 0; i < 8; i++) begin
+                    send_transaction(
+                        8'($urandom),
+                        8'($urandom),
+                        8'($urandom),
+                        8'($urandom),
+                        17'($urandom)
+                    );
+                end
+            end
+
+            // Explicitly prove that the blocked consumer eventually
+            // propagates backpressure to the producer.
+            begin : backpressure_check
+                int timeout;
+
+                timeout = 0;
+
+                while (in_ready && timeout < 12) begin
+                    @(posedge clk);
+                    timeout++;
+                end
+
+                assert (!in_ready)
+                    else $fatal(
+                        1,
+                        "Backpressure did not propagate to input"
+                    );
+            end
+
+            // Keep the consumer stalled long enough for the finite
+            // pipeline to fill, then allow it to drain again.
+            begin : stall_release
+                repeat (12) @(posedge clk);
+
+                @(negedge clk);
+                out_ready = 1'b1;
+            end
+
+        join
+
+        //--------------------------------------------------------
+        // Test 6: Mid-traffic reset
+        //--------------------------------------------------------
+
+        // Force a valid transaction to remain buffered.
+        @(negedge clk);
+        out_ready = 1'b0;
+
+        send_transaction(
+            8'd13,
+            8'd7,
+            8'd5,
+            8'd9,
+            17'd11
+        );
+
+        // Reset while the transaction is still pending.
+        @(negedge clk);
+        reset = 1'b1;
+
+        repeat (2) @(posedge clk);
 
         @(negedge clk);
+        reset     = 1'b0;
         out_ready = 1'b1;
 
+        @(posedge clk);
+
+        assert (!out_valid)
+            else $fatal(
+                1,
+                "Pipeline retained valid output across reset"
+            );
+
+        assert (in_ready)
+            else $fatal(
+                1,
+                "DUT did not recover readiness after reset"
+            );
+
+        assert (expected_queue.size() == 0)
+            else $fatal(
+                1,
+                "Scoreboard was not cleared by reset"
+            );
+
         //--------------------------------------------------------
-        // Test 6: Sustained traffic
+        // Test 7: Randomized traffic with randomized stalls
         //--------------------------------------------------------
 
-        for (int i = 0; i < 20; i++) begin
-            send_transaction(
-                8'($urandom),
-                8'($urandom),
-                8'($urandom),
-                8'($urandom),
-                17'($urandom)
-            );
-        end
+        random_phase_done = 1'b0;
+
+        fork
+
+            begin : random_producer
+                for (int i = 0; i < 40; i++) begin
+                    send_transaction(
+                        8'($urandom),
+                        8'($urandom),
+                        8'($urandom),
+                        8'($urandom),
+                        17'($urandom)
+                    );
+                end
+
+                random_phase_done = 1'b1;
+            end
+
+            begin : random_consumer
+                int consecutive_stalls;
+
+                consecutive_stalls = 0;
+
+                while (!random_phase_done) begin
+                    @(negedge clk);
+
+                    // Bound consecutive random stalls so the regression
+                    // always continues making progress.
+                    if (consecutive_stalls >= 3) begin
+                        out_ready         = 1'b1;
+                        consecutive_stalls = 0;
+                    end else begin
+                        out_ready = 1'($urandom_range(0, 1));
+
+                        if (!out_ready)
+                            consecutive_stalls++;
+                        else
+                            consecutive_stalls = 0;
+                    end
+                end
+
+                @(negedge clk);
+                out_ready = 1'b1;
+            end
+
+        join
 
         //--------------------------------------------------------
         // Drain pipeline
@@ -322,7 +478,10 @@ module mac_pipe1_tb;
         repeat (3) @(posedge clk);
 
         assert (!out_valid)
-            else $fatal(1, "out_valid remained asserted after pipeline drained");
+            else $fatal(
+                1,
+                "out_valid remained asserted after pipeline drained"
+            );
 
         $display("PASS: mac_pipe1 verification complete");
 
