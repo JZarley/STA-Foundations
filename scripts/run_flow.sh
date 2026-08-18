@@ -12,7 +12,7 @@ RTL="rtl/${MODULE}.sv"
 TB="tb/${MODULE}_tb.sv"
 TB_TOP="${MODULE}_tb"
 SIM="obj_dir/V${MODULE}_tb"
-NETLIST="synth_${MODULE}.v"
+NETLIST="results/synth_${MODULE}.v"
 SEED=${2:-1}
 
 if [ ! -f "$RTL" ]; then

@@ -13,7 +13,7 @@ RTL="rtl/${MODULE}.sv"
 TB="tb/${MODULE}_tb.sv"
 TB_TOP="${MODULE}_tb"
 SIM="obj_dir/V${MODULE}_tb"
-NETLIST="synth_${MODULE}.v"
+NETLIST="results/synth_${MODULE}.v"
 
 TOTAL_IN=0
 TOTAL_OUT=0

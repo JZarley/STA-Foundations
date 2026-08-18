@@ -2,6 +2,7 @@
 set -euo pipefail
 
 DESIGN="$1"
+PERIOD="${2:-5.0}"
 
 RTL="rtl/${DESIGN}.sv"
 LIBERTY="lib/NangateOpenCellLibrary_typical.lib"
@@ -12,7 +13,7 @@ SDC="constraints/mac.sdc"
 
 mkdir -p results
 
-echo "=== Synthesizing ${DESIGN} ==="
+echo "Synthesizing ${DESIGN}"
 
 yosys -p "
     read_verilog -sv ${RTL}
@@ -38,12 +39,40 @@ yosys -p "
 " | tee "${SYNTH_LOG}"
 
 echo
-echo "=== Running STA for ${DESIGN} ==="
+echo "Running STA for ${DESIGN}"
 
-sta <<EOF | tee "${STA_LOG}"
+sta <<EOF | tee "${STA_LOG}" | grep -E \
+"=== |Startpoint:|Endpoint:|data arrival time|data required time|slack"
 read_liberty ${LIBERTY}
 read_verilog ${NETLIST}
 link_design ${DESIGN}
+create_clock -name clk -period ${PERIOD} [get_ports clk]
 read_sdc ${SDC}
-report_checks -path_delay max -fields {slew cap input_pins} -digits 3
+
+puts ""
+puts "=== OVERALL WORST SETUP PATHS ==="
+report_checks \
+    -path_delay max \
+    -group_count 1 \
+    -digits 3
+
+puts ""
+puts "=== INPUT -> REGISTER SETUP PATHS ==="
+report_checks \
+    -path_delay max \
+    -from [get_ports {a b c d e}] \
+    -to [all_registers] \
+    -group_count 1 \
+    -fields {input_pins} \
+    -digits 3
+
+puts ""
+puts "=== REGISTER -> REGISTER SETUP PATHS ==="
+report_checks \
+    -path_delay max \
+    -from [all_registers] \
+    -to [all_registers] \
+    -group_count 1 \
+    -fields {input_pins} \
+    -digits 3
 EOF
