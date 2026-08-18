@@ -162,7 +162,7 @@ module mac_unpipelined_tb;
     // Test sequence
     //------------------------------------------------------------
     initial begin
-        $dumpfile("waveform.vcd");
+        $dumpfile("results/waveform.vcd");
         $dumpvars(1, mac_unpipelined_tb);
     end
     initial begin
